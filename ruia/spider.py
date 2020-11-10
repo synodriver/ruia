@@ -4,7 +4,6 @@ import asyncio
 import collections
 import typing
 import weakref
-
 from datetime import datetime
 from functools import reduce
 from inspect import isawaitable
@@ -12,14 +11,9 @@ from signal import SIGINT, SIGTERM
 from types import AsyncGeneratorType
 
 from aiohttp import ClientSession
-
-from ruia.exceptions import (
-    InvalidCallbackResult,
-    NotImplementedParseError,
-    NothingMatchedError,
-)
+from ruia.exceptions import (InvalidCallbackResult, NothingMatchedError,
+                             NotImplementedParseError, SpiderHookError)
 from ruia.item import Item
-from ruia.exceptions import SpiderHookError
 from ruia.middleware import Middleware
 from ruia.request import Request
 from ruia.response import Response
@@ -176,14 +170,6 @@ class Spider(SpiderHook):
         # semaphore, used for concurrency control
         self.sem = asyncio.Semaphore(self.concurrency)
 
-    async def _cancel_tasks(self):
-        tasks = []
-        for task in asyncio.Task.all_tasks():
-            if task is not asyncio.tasks.Task.current_task():
-                tasks.append(task)
-                task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-
     async def _process_async_callback(
         self, callback_results: AsyncGeneratorType, response: Response = None
     ):
@@ -208,9 +194,9 @@ class Spider(SpiderHook):
                     await self.process_callback_result(callback_result=callback_result)
         except NothingMatchedError as e:
             error_info = f"<Field: {str(e).lower()}" + f", error url: {response.url}>"
-            self.logger.error(error_info)
+            self.logger.exception(error_info)
         except Exception as e:
-            self.logger.error(e)
+            self.logger.exception(e)
 
     async def _process_response(self, request: Request, response: Response):
         if response:
@@ -236,7 +222,7 @@ class Spider(SpiderHook):
                                 f"<Middleware {middleware.__name__}: must be a coroutine function"
                             )
                     except Exception as e:
-                        self.logger.error(f"<Middleware {middleware.__name__}: {e}")
+                        self.logger.exception(f"<Middleware {middleware.__name__}: {e}")
 
     async def _run_response_middleware(self, request: Request, response: Response):
         if self.middleware.response_middleware:
@@ -251,7 +237,7 @@ class Spider(SpiderHook):
                                 f"<Middleware {middleware.__name__}: must be a coroutine function"
                             )
                     except Exception as e:
-                        self.logger.error(f"<Middleware {middleware.__name__}: {e}")
+                        self.logger.exception(f"<Middleware {middleware.__name__}: {e}")
 
     async def _start(self, after_start=None, before_stop=None):
         self.logger.info("Spider started!")
@@ -321,6 +307,19 @@ class Spider(SpiderHook):
 
         return spider_ins
 
+    @staticmethod
+    async def cancel_all_tasks():
+        """
+        Cancel all tasks
+        :return:
+        """
+        tasks = []
+        for task in asyncio.Task.all_tasks():
+            if task is not asyncio.tasks.Task.current_task():
+                tasks.append(task)
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
     @classmethod
     def start(
         cls,
@@ -355,15 +354,17 @@ class Spider(SpiderHook):
         return spider_ins
 
     async def handle_callback(self, aws_callback: typing.Coroutine, response):
-        """Process coroutine callback function"""
+        """
+        Process coroutine callback function
+        """
         callback_result = None
 
         try:
             callback_result = await aws_callback
         except NothingMatchedError as e:
-            self.logger.error(f"<Item: {str(e).lower()}>")
+            self.logger.exception(f"<Item: {str(e).lower()}>")
         except Exception as e:
-            self.logger.error(f"<Callback[{aws_callback.__name__}]: {e}")
+            self.logger.exception(f"<Callback[{aws_callback.__name__}]: {e}")
 
         return callback_result, response
 
@@ -383,17 +384,19 @@ class Spider(SpiderHook):
             await self._run_response_middleware(request, response)
             await self._process_response(request=request, response=response)
         except NotImplementedParseError as e:
-            self.logger.error(e)
+            self.logger.exception(e)
         except NothingMatchedError as e:
             error_info = f"<Field: {str(e).lower()}" + f", error url: {request.url}>"
-            self.logger.error(error_info)
+            self.logger.exception(error_info)
         except Exception as e:
-            self.logger.error(f"<Callback[{request.callback.__name__}]: {e}")
+            self.logger.exception(f"<Callback[{request.callback.__name__}]: {e}")
 
         return callback_result, response
 
     async def multiple_request(self, urls, is_gather=False, **kwargs):
-        """For crawling multiple urls"""
+        """
+        For crawling multiple urls
+        """
         if is_gather:
             resp_results = await asyncio.gather(
                 *[self.handle_request(self.request(url=url, **kwargs)) for url in urls],
@@ -439,7 +442,19 @@ class Spider(SpiderHook):
         request_session=None,
         **aiohttp_kwargs,
     ):
-        """Init a Request class for crawling html"""
+        """
+        Init a Request class for crawling html
+        :param url:
+        :param method:
+        :param callback:
+        :param encoding:
+        :param headers:
+        :param metadata:
+        :param request_config:
+        :param request_session:
+        :param aiohttp_kwargs:
+        :return:
+        """
         headers = headers or {}
         metadata = metadata or {}
         request_config = request_config or {}
@@ -462,7 +477,9 @@ class Spider(SpiderHook):
         )
 
     async def start_master(self):
-        """Actually start crawling."""
+        """
+        Actually start crawling
+        """
         async for request_ins in self.process_start_urls():
             self.request_queue.put_nowait(self.handle_request(request_ins))
         workers = [
@@ -477,9 +494,13 @@ class Spider(SpiderHook):
             await self.stop(SIGINT)
         else:
             if self.cancel_tasks:
-                await self._cancel_tasks()
+                await self.cancel_all_tasks()
 
     async def start_worker(self):
+        """
+        Start spider worker
+        :return:
+        """
         while True:
             request_item = await self.request_queue.get()
             self.worker_tasks.append(request_item)
@@ -504,5 +525,5 @@ class Spider(SpiderHook):
         :return:
         """
         self.logger.info(f"Stopping spider: {self.name}")
-        await self._cancel_tasks()
+        await self.cancel_all_tasks()
         self.loop.stop()
